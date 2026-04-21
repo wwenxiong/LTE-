@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+build/
+dist/
+output/
+temp_data/
+processed_files.txt
+.tmp/
+upx-5.1.0-win64/
+upx.exe
+*.xlsx
+# We might want to keep template xlsx but the data ones are too big
+# For now let's just ignore all xlsx to be safe, or specify
+config.json

@@ -1,0 +1,7 @@
+pandas
+openpyxl
+requests
+paramiko
+pystray
+Pillow
+win10toast
