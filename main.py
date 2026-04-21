@@ -23,15 +23,23 @@ from PIL import Image, ImageDraw
 from win10toast import ToastNotifier
 
 
+import sys
+
+# 获取程序运行目录（兼容打包后的路径）
+if getattr(sys, 'frozen', False):
+    BASE_PATH = Path(sys.executable).parent
+else:
+    BASE_PATH = Path(__file__).parent
+
 # =========================
 # 配置（如需可改为命令行参数）
 # =========================
-DEFAULT_OBJECTS_PATH = Path("./Objects.xlsx")
-DEFAULT_RULES_PATH = Path("./Rules.xlsx")
-DEFAULT_OUTPUT_DIR = Path("./output")
-DEFAULT_TEMP_DIR = Path("./temp_data")
-DEFAULT_PROCESSED_FILE = Path("./processed_files.txt")
-CONFIG_PATH = Path("./config.json")
+DEFAULT_OBJECTS_PATH = BASE_PATH / "Objects.xlsx"
+DEFAULT_RULES_PATH = BASE_PATH / "Rules.xlsx"
+DEFAULT_OUTPUT_DIR = BASE_PATH / "output"
+DEFAULT_TEMP_DIR = BASE_PATH / "temp_data"
+DEFAULT_PROCESSED_FILE = BASE_PATH / "processed_files.txt"
+CONFIG_PATH = BASE_PATH / "config.json"
 
 # SFTP 默认配置
 DEFAULT_SFTP_HOST = ""
