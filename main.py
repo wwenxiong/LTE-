@@ -13,6 +13,7 @@ import posixpath
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox
 import queue
+import re
 
 import pandas as pd
 import requests
@@ -367,7 +368,6 @@ def parse_file_time_range(filename: str) -> str:
       - 旧格式：两江VIP指标监控_2026012716001700.xlsx -> 2026-01-27 16:00~17:00
     解析失败时返回"未知时段"。
     """
-    import re
     stem = Path(filename).stem  # 去掉扩展名
 
     # 新格式：xxx_YYYYMMDDHHMM_YYYYMMDDHHMM
@@ -880,10 +880,24 @@ def process_sftp_task(
         files = list_remote_files(sftp, remote_path)
         logging.info("远程目录文件数：%s", len(files))
 
-        for fname in files:
-            suffix = Path(fname).suffix.lower()
-            if suffix not in [".xlsx", ".xls"]:
-                continue
+        # 1. 筛选有效 Excel 文件
+        valid_files = [f for f in files if Path(f).suffix.lower() in [".xlsx", ".xls"]]
+        
+        # 2. 按照文件名中的日期进行倒序排列，确保最新的在前
+        def get_file_sort_key(f):
+            # 提取 8 位及以上的数字作为日期标识
+            m = re.search(r'(\d{8,})', f)
+            return (m.group(1) if m else "", f)
+
+        valid_files.sort(key=get_file_sort_key, reverse=True)
+        
+        # 3. 仅取最新的前 3 个文件进行检查（不论是否已处理）
+        # 这样即使积压了很多历史文件，也只会下载并处理最新的 3 个
+        to_process = valid_files[:3]
+        if len(valid_files) > 3:
+            logging.info("发现 %d 个待选文件，本次仅处理最新的 3 个: %s", len(valid_files), to_process)
+
+        for fname in to_process:
             if fname in processed_set:
                 continue
 
