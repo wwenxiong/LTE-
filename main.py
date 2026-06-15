@@ -199,6 +199,94 @@ def load_objects(objects_path: Path) -> pd.DataFrame:
     return cells_df
 
 
+def parse_filter_condition(condition_str: str) -> Tuple[Optional[str], Optional[str], Optional[float]]:
+    """
+    解析过滤条件，例如 "RRC连接次数大于1000次的小区"
+    返回: (列名, 比较符, 比较值)
+    """
+    if not condition_str or pd.isna(condition_str):
+        return None, None, None
+        
+    s = str(condition_str).strip()
+    if s == "" or s == "无":
+        return None, None, None
+        
+    # 清理末尾无用词汇，如 "的小区", "次", "个"
+    s = re.sub(r'(的小区|次|个|个小区)+$', '', s)
+    
+    # 匹配操作符和数值
+    pattern = r"^(.+?)(>=|<=|>|<|==|!=|大于等于|小于等于|大于|小于|等于|不等于)\s*([-+]?\d+(?:\.\d+)?)$"
+    m = re.match(pattern, s)
+    if not m:
+        return None, None, None
+        
+    col_name = m.group(1).strip()
+    op_str = m.group(2).strip()
+    val_str = m.group(3).strip()
+    
+    # 映射操作符
+    op_map = {
+        "大于等于": ">=",
+        "小于等于": "<=",
+        "大于": ">",
+        "小于": "<",
+        "等于": "==",
+        "不等于": "!=",
+        ">=": ">=",
+        "<=": "<=",
+        ">": ">",
+        "<": "<",
+        "==": "==",
+        "!=": "!="
+    }
+    op = op_map.get(op_str)
+    
+    try:
+        val = float(val_str)
+    except ValueError:
+        return None, None, None
+        
+    return col_name, op, val
+
+
+def find_best_column(metric_name: str, columns: List[str]) -> Optional[str]:
+    """
+    多级模糊匹配列名，支持别名与分词匹配
+    """
+    if metric_name in columns:
+        return metric_name
+    
+    aliases = {
+        "RRC连接次数": ["RRC建立请求数目", "最大的RRC连接建立个数", "RRC建立成功数目"],
+        "释放次次数": ["E-RAB建立成功数目", "E-RAB建立请求数目"],
+        "释放次数": ["E-RAB建立成功数目", "E-RAB建立请求数目"],
+        "连接次数": ["RRC建立请求数目", "E-RAB建立成功数目"],
+    }
+    
+    if metric_name in aliases:
+        for target in aliases[metric_name]:
+            if target in columns:
+                return target
+                
+    for col in columns:
+        if metric_name in col or col in metric_name:
+            return col
+            
+    words = re.findall(r'[a-zA-Z0-9]+|[\u4e00-\u9fa5]', metric_name)
+    if words:
+        best_col = None
+        max_matches = 0
+        for col in columns:
+            matches = sum(1 for w in words if w in col)
+            if matches > max_matches:
+                max_matches = matches
+                best_col = col
+        if max_matches >= (len(words) + 1) // 2 and best_col:
+            return best_col
+            
+    return None
+
+
 def load_rules(rules_path: Path) -> Tuple[pd.DataFrame, Dict[str, Callable[[pd.Series, pd.Series], pd.Series]]]:
     """
     从 Rules.xlsx 读取规则表。
@@ -216,10 +304,14 @@ def load_rules(rules_path: Path) -> Tuple[pd.DataFrame, Dict[str, Callable[[pd.S
         raise ValueError(f"Rules 文件缺少列：{missing}（实际列：{list(rules_df.columns)}）")
 
     # 清洗
-    rules_df = rules_df[required_cols].copy()
+    cols_to_keep = ["监控指标", "判断符", "阈值"]
+    if "过滤条件" in rules_df.columns:
+        cols_to_keep.append("过滤条件")
+    rules_df = rules_df[cols_to_keep].copy()
     rules_df["监控指标"] = rules_df["监控指标"].astype(str).str.strip()
     rules_df["判断符"] = rules_df["判断符"].astype(str).str.strip()
-    # 阈值可能是数字/字符串/空；先原样保留，后面按指标列动态转数值
+    if "过滤条件" in rules_df.columns:
+        rules_df["过滤条件"] = rules_df["过滤条件"].astype(str).str.strip()
 
     # 运算符映射（完全动态读取 Rules.xlsx 的判断符字段）
     op_map: Dict[str, Callable[[pd.Series, pd.Series], pd.Series]] = {
@@ -317,6 +409,7 @@ def evaluate_rules(
         metric = str(row["监控指标"]).strip()
         op = str(row["判断符"]).strip()
         thr_raw = row["阈值"]
+        filter_cond = row.get("过滤条件") if "过滤条件" in row else None
 
         if not metric or metric.lower() == "nan":
             logging.warning("规则第 %s 行监控指标为空，已跳过", i + 2)  # +2 近似考虑表头
@@ -328,16 +421,51 @@ def evaluate_rules(
             logging.warning("报表缺少指标列：%r（规则第 %s 行），已跳过", metric, i + 2)
             continue
 
+        # 运行过滤条件
+        filter_mask = pd.Series(True, index=df.index)
+        parsed_filter_cond = "无"
+        if filter_cond and str(filter_cond).strip() not in ["", "无", "nan", "None"]:
+            filter_cond_str = str(filter_cond).strip()
+            parsed_filter_cond = filter_cond_str
+            filter_col_name, filter_op, filter_val = parse_filter_condition(filter_cond_str)
+            if filter_col_name and filter_op and filter_val is not None:
+                real_filter_col = find_best_column(filter_col_name, df.columns.tolist())
+                if real_filter_col:
+                    f_s = pd.to_numeric(df[real_filter_col], errors="coerce")
+                    f_t = pd.to_numeric(pd.Series([filter_val] * len(df), index=df.index), errors="coerce")
+                    if filter_op in op_map:
+                        filter_mask = op_map[filter_op](f_s, f_t).fillna(False)
+                    else:
+                        logging.warning("过滤条件 %r 中的判断符 %r 不支持", filter_cond_str, filter_op)
+                else:
+                    logging.warning("报表中未匹配到过滤条件列：%r", filter_col_name)
+            else:
+                logging.warning("过滤条件解析失败：%r", filter_cond_str)
+
         s = pd.to_numeric(df[metric], errors="coerce")
         t = pd.to_numeric(pd.Series([thr_raw] * len(df), index=df.index), errors="coerce")
 
-        col_name = f"rule_{metric}_{op}_{thr_raw}"
+        if parsed_filter_cond != "无":
+            col_name = f"rule_{metric}_{op}_{thr_raw}_filtered_{i}"
+        else:
+            col_name = f"rule_{metric}_{op}_{thr_raw}"
+
         result = op_map[op](s, t)
         # NaN 比较结果为 False；为便于排查可保留 NaN 情况
         result = result.fillna(False)
+
+        # 应用过滤掩码
+        result = result & filter_mask
+
         df[col_name] = result
         violated_any = violated_any | result
-        rule_meta.append({"col": col_name, "metric": metric, "op": op, "threshold": thr_raw})
+        rule_meta.append({
+            "col": col_name,
+            "metric": metric,
+            "op": op,
+            "threshold": thr_raw,
+            "filter_cond": parsed_filter_cond
+        })
 
     df["是否触发告警"] = violated_any
     return df, rule_meta
@@ -434,7 +562,11 @@ def build_markdown_content(alert_df: pd.DataFrame, rule_meta: List[Dict[str, obj
             op = meta["op"]
             thr_raw = meta["threshold"]
             cur_val = row.get(metric, "N/A")
-            lines.append(f"- {metric} {op} {thr_raw}，当前值：**{cur_val}**")
+            filter_cond = meta.get("filter_cond", "无")
+            if filter_cond != "无":
+                lines.append(f"- {metric} {op} {thr_raw} (过滤条件: {filter_cond})，当前值：**{cur_val}**")
+            else:
+                lines.append(f"- {metric} {op} {thr_raw}，当前值：**{cur_val}**")
             alert_count += 1
         lines.append("")  # 分隔不同小区
     lines.append("---")
